@@ -25,6 +25,11 @@ DEFAULT_PARAMETERS = {
     "curvature_radius_ratio": 4.0,
     "source_curvature_percentile": 60.0,
     "target_curvature_percentile": 60.0,
+    "mid_curvature_percentile": 35.0,
+    "high_curvature_fraction": 0.4,
+    "mid_curvature_fraction": 0.3,
+    "uniform_fraction": 0.3,
+    "max_roi_points": 12000,
     "min_roi_points": 100,
     "cluster_eps_ratio": 4.0,
     "min_cluster_points": 8,
@@ -37,6 +42,7 @@ DEFAULT_PARAMETERS = {
     "post_normal_angle": 35.0,
     "max_downsample_points": 40000,
     "mutual_filter": True,
+    "icp_use_full_cloud": True,
 }
 
 
@@ -60,7 +66,7 @@ def curvature_roi_parameters(parameters=None):
         "cluster_eps_ratio",
         "ransac_max_iteration", "icp_max_iteration", "min_roi_points",
         "min_cluster_points", "max_clusters", "ransac_n",
-        "max_downsample_points",
+        "max_downsample_points", "max_roi_points",
     )
     for key in positive:
         if not np.isfinite(result[key]) or result[key] <= 0:
@@ -78,6 +84,13 @@ def curvature_roi_parameters(parameters=None):
     for key in ("source_curvature_percentile", "target_curvature_percentile"):
         if not 0 <= result[key] < 100:
             raise ValueError(f"curvature_roi.{key} must be in [0, 100)")
+    if not 0 <= result["mid_curvature_percentile"] < 100:
+        raise ValueError("curvature_roi.mid_curvature_percentile must be in [0, 100)")
+    for key in ("high_curvature_fraction", "mid_curvature_fraction", "uniform_fraction"):
+        if not np.isfinite(result[key]) or result[key] < 0:
+            raise ValueError(f"curvature_roi.{key} must be finite and non-negative")
+    if result["high_curvature_fraction"] + result["mid_curvature_fraction"] + result["uniform_fraction"] <= 0:
+        raise ValueError("curvature_roi sampling fractions must have a positive sum")
     for key in ("ransac_confidence", "edge_length_threshold"):
         if not 0 < result[key] <= 1:
             raise ValueError(f"curvature_roi.{key} must be in (0, 1]")
@@ -136,8 +149,21 @@ def normal_axis_mask(normals, axis, max_angle_deg):
     return valid & (cosines >= np.cos(np.deg2rad(max_angle_deg)))
 
 
+def _sample_indices(indices, count, rng):
+    indices = np.asarray(indices, dtype=np.int64)
+    if count <= 0 or len(indices) == 0:
+        return np.empty(0, dtype=np.int64)
+    if len(indices) <= count:
+        return indices.copy()
+    return np.sort(rng.choice(indices, size=count, replace=False))
+
+
 def extract_roi(cloud, percentile, args):
-    """Downsample once, select positive curvature, then apply optional filters."""
+    """Build a mixed ROI instead of keeping only the highest-curvature tail.
+
+    High-curvature points improve feature distinctiveness, while mid-curvature
+    and spatially uniform points keep the hypothesis tied to larger structures.
+    """
     down = cloud.voxel_down_sample(args.voxel_size)
     if len(down.points) > args.max_downsample_points:
         # Keep preprocessing bounded and deterministic for very dense scans.
@@ -152,9 +178,47 @@ def extract_roi(cloud, percentile, args):
         raise ValueError("Insufficient positive-curvature points; no full-cloud fallback")
     valid_cloud = down.select_by_index(valid_indices.tolist())
     valid_curvatures = curvatures[valid_indices]
-    threshold = np.percentile(valid_curvatures, percentile)
-    roi = valid_cloud.select_by_index(np.flatnonzero(valid_curvatures >= threshold).tolist())
-    counts = {"down_points": len(down.points), "curvature_points": len(roi.points)}
+    high_threshold = np.percentile(valid_curvatures, percentile)
+    mid_threshold = np.percentile(
+        valid_curvatures,
+        min(float(args.mid_curvature_percentile), max(float(percentile) - 1e-6, 0.0)),
+    )
+    high_local = np.flatnonzero(valid_curvatures >= high_threshold)
+    mid_local = np.flatnonzero(
+        (valid_curvatures >= mid_threshold) & (valid_curvatures < high_threshold)
+    )
+    all_local = np.arange(len(valid_indices), dtype=np.int64)
+    rng = np.random.default_rng(20261112)
+    fractions = np.asarray([
+        args.high_curvature_fraction,
+        args.mid_curvature_fraction,
+        args.uniform_fraction,
+    ], dtype=float)
+    fractions /= np.sum(fractions)
+    roi_limit = max(int(args.max_roi_points), int(args.min_roi_points), int(args.ransac_n))
+    quotas = np.floor(fractions * roi_limit).astype(int)
+    quotas[-1] += roi_limit - int(np.sum(quotas))
+
+    chosen_high = _sample_indices(high_local, quotas[0], rng)
+    chosen_mid = _sample_indices(mid_local, quotas[1], rng)
+    chosen = np.unique(np.concatenate([chosen_high, chosen_mid]))
+    remaining = np.setdiff1d(all_local, chosen, assume_unique=False)
+    chosen_uniform = _sample_indices(remaining, quotas[2], rng)
+    selected_local = np.unique(np.concatenate([chosen, chosen_uniform]))
+    if len(selected_local) < roi_limit:
+        fill_pool = np.setdiff1d(all_local, selected_local, assume_unique=False)
+        fill = _sample_indices(fill_pool, roi_limit - len(selected_local), rng)
+        selected_local = np.unique(np.concatenate([selected_local, fill]))
+
+    roi = valid_cloud.select_by_index(selected_local.tolist())
+    counts = {
+        "down_points": len(down.points),
+        "curvature_points": len(valid_indices),
+        "high_curvature_points": len(chosen_high),
+        "mid_curvature_points": len(chosen_mid),
+        "uniform_points": len(chosen_uniform),
+        "roi_points_before_filter": len(roi.points),
+    }
     if args.enable_normal_axis_filter:
         estimate_normals(roi, args.normal_radius_ratio * args.voxel_size)
         mask = normal_axis_mask(np.asarray(roi.normals), args.normal_axis, args.normal_axis_angle)
@@ -280,6 +344,21 @@ def register_curvature_roi(source, target, parameters=None):
                 source_roi, target_roi, coarse.transformation, ransac_threshold, args.post_normal_angle,
             )
         report["timing"]["post_filter_seconds"] = time.perf_counter() - post_started
+        if parameters.get("icp_use_full_cloud", True):
+            source_icp = source.voxel_down_sample(args.voxel_size)
+            target_icp = target.voxel_down_sample(args.voxel_size)
+            if len(source_icp.points) > args.max_downsample_points:
+                source_icp = source_icp.select_by_index(
+                    np.sort(np.random.default_rng(20261112).choice(
+                        len(source_icp.points), size=args.max_downsample_points, replace=False
+                    )).tolist()
+                )
+            if len(target_icp.points) > args.max_downsample_points:
+                target_icp = target_icp.select_by_index(
+                    np.sort(np.random.default_rng(20261113).choice(
+                        len(target_icp.points), size=args.max_downsample_points, replace=False
+                    )).tolist()
+                )
         report["source"]["icp_points"] = len(source_icp.points)
         report["target"]["icp_points"] = len(target_icp.points)
         source_aligned = o3d.geometry.PointCloud(source_icp)
