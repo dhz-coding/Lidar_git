@@ -159,15 +159,55 @@ def _direction_metrics(source_points: np.ndarray, target_points: np.ndarray, thr
     distances, indices = tree.query(source_points, k=1, workers=1)
     matched = np.isfinite(distances) & (distances <= threshold)
     count = int(np.count_nonzero(matched))
+    global_fitness = float(count / max(len(source_points), 1))
     return {
-        "fitness": float(count / max(len(source_points), 1)),
+        "fitness": global_fitness,
+        "global_fitness": global_fitness,
         "inlier_rmse": float(np.sqrt(np.mean(distances[matched] ** 2))) if count else None,
         "correspondence_count": count,
         "point_count": int(len(source_points)),
+        "overlap_candidate_count": int(len(source_points)),
+        "overlap_candidate_fraction": 1.0,
         "p90_distance": float(np.percentile(distances[matched], 90)) if count else None,
         "_matched_mask": matched,
+        "_eligible_mask": np.ones(len(source_points), dtype=bool),
+        "_distances": distances,
         "_nearest_indices": indices,
     }
+
+
+def _expanded_bbox_mask(points: np.ndarray, reference_points: np.ndarray, margin: float) -> np.ndarray:
+    """Estimate which points can belong to the observable overlap region."""
+    if len(points) == 0 or len(reference_points) == 0:
+        return np.zeros(len(points), dtype=bool)
+    minimum = np.min(reference_points, axis=0) - margin
+    maximum = np.max(reference_points, axis=0) + margin
+    return np.all((points >= minimum) & (points <= maximum), axis=1)
+
+
+def _direction_metrics_in_overlap(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    threshold: float,
+    eligible_mask: np.ndarray,
+):
+    metrics = _direction_metrics(source_points, target_points, threshold)
+    eligible_mask = np.asarray(eligible_mask, dtype=bool)
+    if eligible_mask.shape != (len(source_points),):
+        raise ValueError("overlap eligibility mask has an invalid shape")
+    eligible = eligible_mask & np.isfinite(metrics["_nearest_indices"])
+    matched = metrics["_matched_mask"] & eligible
+    candidate_count = int(np.count_nonzero(eligible))
+    match_count = int(np.count_nonzero(matched))
+    metrics.update({
+        "fitness": float(match_count / max(candidate_count, 1)),
+        "overlap_candidate_count": candidate_count,
+        "overlap_candidate_fraction": float(candidate_count / max(len(source_points), 1)),
+        "inlier_rmse": float(np.sqrt(np.mean(metrics["_distances"][matched] ** 2))) if match_count else None,
+        "_matched_mask": matched,
+        "_eligible_mask": eligible,
+    })
+    return metrics
 
 
 def evaluate_transform(
@@ -198,14 +238,31 @@ def evaluate_transform(
     transformed_source = source_points @ rotation.T + translation
     inverse = np.linalg.inv(transformation)
     transformed_target = target_points @ inverse[:3, :3].T + inverse[:3, 3]
-    forward = _direction_metrics(transformed_source, target_points, threshold)
-    reverse = _direction_metrics(transformed_target, source_points, threshold)
+    overlap_gate = max(
+        threshold * settings.validation_overlap_gate_factor,
+        voxel * 2.0,
+    )
+    forward_overlap = _expanded_bbox_mask(transformed_source, target_points, overlap_gate)
+    reverse_overlap = _expanded_bbox_mask(transformed_target, source_points, overlap_gate)
+    forward = _direction_metrics_in_overlap(
+        transformed_source, target_points, threshold, forward_overlap
+    )
+    reverse = _direction_metrics_in_overlap(
+        transformed_target, source_points, threshold, reverse_overlap
+    )
     fitness = min(forward["fitness"], reverse["fitness"])
+    global_fitness = min(forward["global_fitness"], reverse["global_fitness"])
     rmses = [metric["inlier_rmse"] for metric in (forward, reverse) if metric["inlier_rmse"] is not None]
     rmse = max(rmses) if rmses else math.inf
     max_rmse = settings.validation_rmse_factor * reference_spacing
     review_rmse = settings.review_rmse_factor * reference_spacing
-    enough = min(forward["correspondence_count"], reverse["correspondence_count"]) >= 30
+    enough = (
+        min(forward["correspondence_count"], reverse["correspondence_count"]) >= 30
+        and min(
+            forward["overlap_candidate_count"],
+            reverse["overlap_candidate_count"],
+        ) >= settings.min_overlap_candidate_points
+    )
 
     # Estimate how much of the stable, approximately vertical structure agrees.
     # This is a proxy for hull walls and rails, while avoiding a dependence on
@@ -225,8 +282,14 @@ def evaluate_transform(
         target_stable = np.abs(target_normals[:, 2]) <= 0.60
         source_matched = forward["_matched_mask"] & source_stable
         target_matched = reverse["_matched_mask"] & target_stable
-        forward_stable = float(np.count_nonzero(source_matched) / max(np.count_nonzero(source_stable), 1))
-        reverse_stable = float(np.count_nonzero(target_matched) / max(np.count_nonzero(target_stable), 1))
+        source_stable_overlap = source_stable & forward["_eligible_mask"]
+        target_stable_overlap = target_stable & reverse["_eligible_mask"]
+        forward_stable = float(
+            np.count_nonzero(source_matched) / max(np.count_nonzero(source_stable_overlap), 1)
+        )
+        reverse_stable = float(
+            np.count_nonzero(target_matched) / max(np.count_nonzero(target_stable_overlap), 1)
+        )
         stable_wall_overlap = min(forward_stable, reverse_stable)
 
         rotated_source_normals = source_normals @ rotation.T
@@ -260,9 +323,12 @@ def evaluate_transform(
         "failure_reasons": reasons,
         "validation_voxel": voxel,
         "validation_distance": threshold,
+        "validation_overlap_gate": overlap_gate,
+        "min_overlap_candidate_points": settings.min_overlap_candidate_points,
         "max_rmse": max_rmse,
         "review_max_rmse": review_rmse,
         "fitness": float(fitness),
+        "global_fitness": float(global_fitness),
         "inlier_rmse": float(rmse) if np.isfinite(rmse) else None,
         "forward": public_forward,
         "reverse": public_reverse,
@@ -270,6 +336,9 @@ def evaluate_transform(
         "normal_consistency": normal_consistency,
         "pair_quality": {
             "symmetric_overlap": float(fitness),
+            "global_symmetric_fitness": float(global_fitness),
+            "forward_overlap_candidates": forward["overlap_candidate_count"],
+            "reverse_overlap_candidates": reverse["overlap_candidate_count"],
             "stable_wall_overlap": stable_wall_overlap,
             "normal_consistency": normal_consistency,
             "distance_p90": float(max(

@@ -42,9 +42,12 @@ adaptive:
 
   # The validation snapshot is fixed for all retries of one pair.
   validation_distance_factor: 3.0
+  # Fitness is normalized by points that can geometrically overlap after the candidate transform.
+  validation_overlap_gate_factor: 3.0
+  min_overlap_candidate_points: 100
   validation_rmse_factor: 3.5
-  min_validation_fitness: 0.35
-  review_validation_fitness: 0.20
+  min_validation_fitness: 0.55
+  review_validation_fitness: 0.35
   review_rmse_factor: 5.0
   validation_sample_points: 60000
 

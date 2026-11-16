@@ -56,9 +56,12 @@ class AdaptiveSettings:
     enable_cluster_filter: bool = True
     max_attempts: int = 6
     validation_distance_factor: float = 3.0
+    validation_overlap_gate_factor: float = 3.0
+    min_overlap_candidate_points: int = 100
     validation_rmse_factor: float = 3.5
-    min_validation_fitness: float = 0.35
-    review_validation_fitness: float = 0.20
+    # Fitness is measured only inside the candidate overlap region.
+    min_validation_fitness: float = 0.55
+    review_validation_fitness: float = 0.35
     review_rmse_factor: float = 5.0
     validation_sample_points: int = 60_000
 
