@@ -1,0 +1,50 @@
+# 质量评估 + 自适应初值 demo 配置
+# 直接在这里填写输入和输出路径，之后运行 python adaptive_registration_demo.py 即可
+before_path: "E:/work-lidar/base/data_lidar_adaptive/001/before"
+after_path: "E:/work-lidar/base/data_lidar_adaptive/001/after"
+output_dir: "E:/work-lidar/base/data_lidar_adaptive/001/output"
+# 配对质量驱动 demo。review 结果会保留并在报告中标记 state=review
+# 装沙前内部配准固定采用严格模式，不自动接受 review
+accept_review: true
+# 只有装沙前后扫描位置明确一一对应时才打开。默认关闭。
+use_before_pose_prior: false
+
+quality:
+  min_points: 1000
+  min_finite_ratio: 0.995
+  max_duplicate_ratio: 0.03
+  grade_a_density_ratio: 5.0
+  grade_b_density_ratio: 9.0
+  grade_a_roughness_p90: 0.08
+  grade_b_roughness_p90: 0.18
+
+adaptive:
+  # voxel_size = clip(voxel_factor * max(source_s50, target_s50) * quality_factor)
+  voxel_factor: 8.0
+  min_voxel_size: 0.04
+  max_voxel_size: 0.25
+  normal_radius_ratio: 3.0
+  feature_radius_ratio: 6.0
+  curvature_radius_ratio: 4.0
+  ransac_distance_ratio: 3.5
+  icp_distance_ratio: 2.0
+  ransac_n: 4
+  ransac_max_iteration: 1000000
+  ransac_confidence: 0.999
+  edge_length_threshold: 0.90
+  icp_max_iteration: 500
+  max_downsample_points: 40000
+  min_roi_points: 300
+  min_cluster_points: 8
+  max_clusters: 8
+  enable_cluster_filter: true
+  max_attempts: 6
+
+  # The validation snapshot is fixed for all retries of one pair.
+  validation_distance_factor: 3.0
+  validation_rmse_factor: 3.5
+  min_validation_fitness: 0.35
+  review_validation_fitness: 0.20
+  review_rmse_factor: 5.0
+  validation_sample_points: 60000
+
