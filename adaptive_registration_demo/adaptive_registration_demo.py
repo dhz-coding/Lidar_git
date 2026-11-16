@@ -57,6 +57,28 @@ def transform_difference(actual: np.ndarray, expected: np.ndarray) -> dict[str, 
     }
 
 
+def rotation_angles_deg(rotation: np.ndarray) -> dict[str, float]:
+    """Return ZYX yaw, pitch and roll angles for a rigid rotation matrix."""
+    rotation = np.asarray(rotation, dtype=float)
+    if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
+        raise ValueError("rotation must be a finite 3x3 matrix")
+    pitch = math.atan2(
+        -float(rotation[2, 0]),
+        math.hypot(float(rotation[0, 0]), float(rotation[1, 0])),
+    )
+    if math.hypot(float(rotation[0, 0]), float(rotation[1, 0])) > 1e-8:
+        roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
+        yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+    else:
+        roll = math.atan2(-float(rotation[0, 1]), float(rotation[1, 1]))
+        yaw = 0.0
+    return {
+        "yaw_deg": math.degrees(yaw),
+        "pitch_deg": math.degrees(pitch),
+        "roll_deg": math.degrees(roll),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="装沙前后点云质量评估、参数自适应初值和配准 demo",
@@ -222,6 +244,22 @@ def evaluate_transform(
     if not validate_transform(transformation):
         return {"state": "rejected", "passed": False, "failure_reasons": ["invalid_transform"]}
 
+    angles = rotation_angles_deg(transformation[:3, :3])
+    angle_failures = []
+    if abs(angles["pitch_deg"]) > settings.max_pitch_deg:
+        angle_failures.append("pitch_limit_exceeded")
+    if abs(angles["roll_deg"]) > settings.max_roll_deg:
+        angle_failures.append("roll_limit_exceeded")
+    if angle_failures:
+        return {
+            "state": "rejected",
+            "passed": False,
+            "failure_reasons": angle_failures,
+            "rotation_angles_deg": angles,
+            "max_pitch_deg": settings.max_pitch_deg,
+            "max_roll_deg": settings.max_roll_deg,
+        }
+
     voxel = float(validation_voxel or max(reference_spacing * 4.0, 1e-3))
     threshold = max(reference_spacing * settings.validation_distance_factor, voxel * 1.5)
     source_snapshot = source.voxel_down_sample(voxel)
@@ -325,6 +363,9 @@ def evaluate_transform(
         "validation_distance": threshold,
         "validation_overlap_gate": overlap_gate,
         "min_overlap_candidate_points": settings.min_overlap_candidate_points,
+        "rotation_angles_deg": angles,
+        "max_pitch_deg": settings.max_pitch_deg,
+        "max_roll_deg": settings.max_roll_deg,
         "max_rmse": max_rmse,
         "review_max_rmse": review_rmse,
         "fitness": float(fitness),
@@ -584,6 +625,21 @@ def adaptive_register_pair(
         selected = np.asarray(candidate_rows[0]["transformation"], dtype=float)
         selected_validation = candidate_rows[0]["validation"]
 
+    attempt_validation_rows = [
+        row.get("validation")
+        for row in attempts
+        if row.get("validation") and row["validation"].get("rotation_angles_deg")
+    ]
+    attempt_validation_rows.sort(
+        key=lambda item: (
+            0 if item.get("state") == "passed" else 1,
+            0 if item.get("state") == "review" else 1,
+            -float(item.get("fitness", 0.0)),
+            float(item.get("inlier_rmse") or math.inf),
+        )
+    )
+    best_attempt_validation = attempt_validation_rows[0] if attempt_validation_rows else None
+
     report = {
         "pair_name": pair_name,
         "success": selected is not None,
@@ -597,6 +653,13 @@ def adaptive_register_pair(
         "base_parameters": base_parameters,
         "selected_pair_quality": (
             selected_validation.get("pair_quality") if selected_validation else None
+        ),
+        "selected_rotation_angles_deg": (
+            selected_validation.get("rotation_angles_deg") if selected_validation else None
+        ),
+        "best_attempt_rotation_angles_deg": (
+            best_attempt_validation.get("rotation_angles_deg")
+            if best_attempt_validation else None
         ),
     }
     return selected, report
@@ -739,6 +802,12 @@ def register_group(
         "quality_reports": qualities,
         "transforms_to_reference": transforms,
         "pair_reports": pair_reports,
+        "selected_rotation_angles_deg": (
+            pair_reports[-1].get("selected_rotation_angles_deg") if pair_reports else None
+        ),
+        "best_attempt_rotation_angles_deg": (
+            pair_reports[-1].get("best_attempt_rotation_angles_deg") if pair_reports else None
+        ),
         "status": "complete" if all(item is not None for item in transforms) else "partial",
     }
     write_cloud(output_dir / f"{label}_registered.pcd", merged, ascii_output)
@@ -752,6 +821,19 @@ def make_coloured_overlay(before: o3d.geometry.PointCloud, after_aligned: o3d.ge
     before_coloured.paint_uniform_color([0.10, 0.45, 1.00])
     after_coloured.paint_uniform_color([1.00, 0.12, 0.05])
     return before_coloured + after_coloured
+
+
+def print_rotation_summary(label: str, report: dict[str, Any]) -> None:
+    angles = report.get("selected_rotation_angles_deg") or report.get("best_attempt_rotation_angles_deg")
+    if angles:
+        print(
+            f"[{label}] yaw={angles.get('yaw_deg', 0.0):.2f}°，"
+            f"pitch={angles.get('pitch_deg', 0.0):.2f}°，"
+            f"roll={angles.get('roll_deg', 0.0):.2f}°",
+            flush=True,
+        )
+    else:
+        print(f"[{label}] 没有可记录的旋转角度", flush=True)
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -798,6 +880,8 @@ def run(args: argparse.Namespace) -> Path:
             else None
         ),
     )
+    print_rotation_summary("前配准", before_report)
+    print_rotation_summary("后配准", after_report)
 
     before_quality = assess_cloud(before_merged, "before_registered", quality_thresholds)
     after_quality = assess_cloud(after_merged, "after_registered", quality_thresholds)
@@ -810,7 +894,14 @@ def run(args: argparse.Namespace) -> Path:
         "after -> before",
         accept_review=accept_review,
     )
+    print_rotation_summary("前后配准", before_after_registration_report)
     if after_aligned is None:
+        write_json(output_dir / "before_after_registration_report.json", before_after_registration_report)
+        write_json(output_dir / "adaptive_parameters.json", {
+            "before": before_report.get("pair_reports", []),
+            "after": after_report.get("pair_reports", []),
+            "before_after": pair_parameters,
+        })
         raise RuntimeError(
             "装沙后到装沙前的整体配准没有通过固定双向验证。"
             "请查看 before_after_registration_report.json 中的每轮参数和失败原因。"
@@ -843,6 +934,14 @@ def run(args: argparse.Namespace) -> Path:
         "after_registration": after_report,
         "before_after_initial_parameters": pair_parameters,
         "before_after_registration": before_after_registration_report,
+        "registration_rotation_angles_deg": {
+            "before": before_report.get("selected_rotation_angles_deg")
+            or before_report.get("best_attempt_rotation_angles_deg"),
+            "after": after_report.get("selected_rotation_angles_deg")
+            or after_report.get("best_attempt_rotation_angles_deg"),
+            "before_after": before_after_registration_report.get("selected_rotation_angles_deg")
+            or before_after_registration_report.get("best_attempt_rotation_angles_deg"),
+        },
         "outputs": {
             "before_registered": str(output_dir / "before_registered.pcd"),
             "after_registered": str(output_dir / "after_registered.pcd"),

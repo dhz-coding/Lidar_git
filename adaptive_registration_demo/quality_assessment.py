@@ -60,8 +60,10 @@ class AdaptiveSettings:
     min_overlap_candidate_points: int = 100
     validation_rmse_factor: float = 3.5
     # Fitness is measured only inside the candidate overlap region.
-    min_validation_fitness: float = 0.55
-    review_validation_fitness: float = 0.35
+    min_validation_fitness: float = 0.50
+    review_validation_fitness: float = 0.30
+    max_pitch_deg: float = 60.0
+    max_roll_deg: float = 60.0
     review_rmse_factor: float = 5.0
     validation_sample_points: int = 60_000
 
