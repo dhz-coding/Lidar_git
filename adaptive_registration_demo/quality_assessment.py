@@ -50,12 +50,6 @@ class AdaptiveSettings:
     edge_length_threshold: float = 0.90
     icp_max_iteration: int = 500
     max_downsample_points: int = 40_000
-    max_roi_points: int = 12_000
-    high_curvature_fraction: float = 0.40
-    mid_curvature_fraction: float = 0.30
-    uniform_fraction: float = 0.30
-    mid_curvature_percentile: float = 35.0
-    icp_use_full_cloud: bool = True
     min_roi_points: int = 300
     min_cluster_points: int = 8
     max_clusters: int = 8
@@ -280,11 +274,6 @@ def choose_parameters(
         "curvature_radius_ratio": settings.curvature_radius_ratio,
         "source_curvature_percentile": float(np.clip(source_percentile, 35.0, 92.0)),
         "target_curvature_percentile": float(np.clip(target_percentile, 35.0, 95.0)),
-        "mid_curvature_percentile": float(np.clip(settings.mid_curvature_percentile, 20.0, 60.0)),
-        "high_curvature_fraction": settings.high_curvature_fraction,
-        "mid_curvature_fraction": settings.mid_curvature_fraction,
-        "uniform_fraction": settings.uniform_fraction,
-        "max_roi_points": settings.max_roi_points,
         "min_roi_points": settings.min_roi_points,
         "cluster_eps_ratio": 4.0 if tier in {"A", "B"} else 5.0,
         "min_cluster_points": settings.min_cluster_points,
@@ -296,7 +285,6 @@ def choose_parameters(
         "enable_post_normal_filter": False,
         "post_normal_angle": 35.0,
         "max_downsample_points": settings.max_downsample_points,
-        "icp_use_full_cloud": settings.icp_use_full_cloud,
         "mutual_filter": True,
         "quality_level": tier,
         "reference_spacing": spacing,

@@ -92,8 +92,6 @@ voxel_size = clip(8 × max(before_s50, after_s50) × quality_factor)
 
 质量等级会影响体素、曲率百分位、FPFH 搜索半径、RANSAC 距离和 ICP 距离。装沙前和装沙后的曲率百分位分别计算，避免泥沙遮挡导致源点云有效结构不足。
 
-粗配准使用混合 ROI：高曲率点用于提高特征辨识度，中曲率点和空间均匀点用于保留墙面、底面等大尺度结构，避免只关注局部边角。高曲率 ROI 只负责 FPFH + RANSAC 候选生成；粗配准成功后，ICP 默认在完整体素下采样点云上细化。可通过 `high_curvature_fraction`、`mid_curvature_fraction`、`uniform_fraction`、`max_roi_points` 和 `icp_use_full_cloud` 调整。
-
 配准失败后按照失败现象依次尝试：
 
 - 降低曲率百分位并扩大特征搜索范围

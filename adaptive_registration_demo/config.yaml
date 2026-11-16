@@ -34,14 +34,6 @@ adaptive:
   edge_length_threshold: 0.90
   icp_max_iteration: 500
   max_downsample_points: 40000
-  # Mixed ROI: high-curvature features + mid-curvature structure + uniform support.
-  max_roi_points: 12000
-  high_curvature_fraction: 0.40
-  mid_curvature_fraction: 0.30
-  uniform_fraction: 0.30
-  mid_curvature_percentile: 35.0
-  # Use the full voxel-downsampled clouds for final ICP after ROI RANSAC.
-  icp_use_full_cloud: true
   min_roi_points: 300
   min_cluster_points: 8
   max_clusters: 8
